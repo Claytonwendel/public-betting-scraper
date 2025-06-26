@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: betting-scraper-api
+    name: public-betting-scraper
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
