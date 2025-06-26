@@ -2,14 +2,10 @@ import requests
 from bs4 import BeautifulSoup
 import json
 from datetime import datetime
-import time
-from typing import Dict, List, Optional
+import re
 import logging
 from flask import Flask, jsonify
 from flask_cors import CORS
-from apscheduler.schedulers.background import BackgroundScheduler
-import atexit
-import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -17,11 +13,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
-
-# Global variable to store scraped data
-cached_data = {
-    'mlb': []
-}
 
 def scrape_mlb_data():
     """Scrape MLB betting data - simplified version"""
@@ -37,7 +28,6 @@ def scrape_mlb_data():
         games = []
         
         # This is a simplified scraper - you may need to adjust selectors
-        # based on the actual website structure
         game_elements = soup.find_all(['div', 'tr'], class_=re.compile('game|match|row'))
         
         for element in game_elements[:10]:  # Limit to first 10 games
@@ -124,38 +114,13 @@ def scrape_mlb_data():
             }
         ]
 
-def update_data():
-    """Update betting data"""
-    global cached_data
-    logger.info("Updating betting data...")
-    
-    try:
-        mlb_games = scrape_mlb_data()
-        cached_data['mlb'] = mlb_games
-        logger.info(f"Updated MLB data with {len(mlb_games)} games")
-    except Exception as e:
-        logger.error(f"Error updating data: {e}")
-
-# Set up scheduler
-scheduler = BackgroundScheduler()
-scheduler.add_job(func=update_data, trigger="interval", minutes=5)
-scheduler.start()
-
-# Shut down the scheduler when exiting
-atexit.register(lambda: scheduler.shutdown())
-
-# Initial data load
-update_data()
-
 @app.route('/')
 def home():
     return jsonify({
-        "message": "Sports Betting API",
+        "message": "Public Betting Scraper API",
         "endpoints": {
             "/api/health": "Health check",
             "/api/betting/mlb": "Get MLB betting data",
-            "/api/betting/all": "Get all sports data",
-            "/api/refresh": "Manually refresh data"
         }
     })
 
@@ -163,29 +128,18 @@ def home():
 def health_check():
     return jsonify({
         "status": "healthy",
-        "sports_available": list(cached_data.keys()),
         "timestamp": datetime.now().isoformat()
     })
 
 @app.route('/api/betting/mlb')
 def get_mlb_data():
+    # Scrape fresh data on each request (for now)
+    data = scrape_mlb_data()
     return jsonify({
         "sport": "mlb",
-        "data": cached_data.get('mlb', []),
+        "data": data,
         "last_updated": datetime.now().isoformat()
     })
-
-@app.route('/api/betting/all')
-def get_all_data():
-    return jsonify({
-        "data": cached_data,
-        "last_updated": datetime.now().isoformat()
-    })
-
-@app.route('/api/refresh', methods=['POST'])
-def refresh_data():
-    update_data()
-    return jsonify({"message": "Data refresh initiated"})
 
 if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=5000)
