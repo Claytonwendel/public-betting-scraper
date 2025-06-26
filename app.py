@@ -15,7 +15,7 @@ app = Flask(__name__)
 CORS(app)
 
 def scrape_mlb_data():
-    """Scrape MLB betting data from SportsBettingDime table"""
+    """Scrape MLB betting data from SportsBettingDime"""
     try:
         url = "https://www.sportsbettingdime.com/mlb/public-betting-trends/"
         headers = {
@@ -36,69 +36,64 @@ def scrape_mlb_data():
         
         games = []
         
-        # Find the main table (debug showed 1 table with 32 rows)
-        table = soup.find('table')
+        # Look for elements containing team abbreviations AND percentages together
+        # Common patterns: divs or sections with class names like 'game', 'matchup', 'betting', 'trends'
+        potential_containers = soup.find_all(['div', 'section', 'article'], 
+                                           class_=re.compile('game|matchup|betting|trend|sport|contest', re.I))
         
-        if not table:
-            logger.error("No table found on page")
-            return []
+        logger.info(f"Found {len(potential_containers)} potential game containers")
         
-        # Get all rows from the table
-        rows = table.find_all('tr')
-        logger.info(f"Found table with {len(rows)} rows")
+        # Also look for any element that contains both team names and percentages
+        all_elements = soup.find_all(['div', 'tr', 'section'])
         
-        # Skip header row(s) and process game rows
-        for idx, row in enumerate(rows):
+        for element in all_elements:
             try:
-                # Get all cells in the row
-                cells = row.find_all(['td', 'th'])
+                element_text = element.get_text(separator=' ', strip=True)
                 
-                if len(cells) < 6:  # Need enough cells for game data
+                # Skip if no percentages
+                if '%' not in element_text:
                     continue
                 
-                # Get text from each cell
-                cell_texts = [cell.get_text(strip=True) for cell in cells]
-                
-                # Skip if this looks like a header row
-                if any(header in ' '.join(cell_texts).lower() for header in ['matchup', 'moneyline', 'spread', 'total', 'team']):
-                    continue
-                
-                # Log row data for debugging
-                logger.info(f"Row {idx}: {cell_texts[:8]}")  # Log first 8 cells
-                
-                # Look for team abbreviations in the first few cells
-                teams = []
-                for text in cell_texts[:4]:  # Check first 4 cells for teams
-                    # Match 2-4 letter uppercase abbreviations
-                    team_match = re.search(r'\b([A-Z]{2,4})\b', text)
-                    if team_match:
-                        team = team_match.group(1)
-                        # Filter out known non-team abbreviations
-                        if team not in ['PM', 'AM', 'ET', 'EST', 'CST', 'PST', 'ESPN', 'BET', 'ATS', 'DFS', 'UFC', 'MVP', 'DPOY', 'OROY', 'DROY', 'MLB', 'NBA', 'NFL', 'NHL']:
-                            teams.append(team)
-                
-                if len(teams) < 2:
-                    continue
-                
-                # Extract time from the row
-                time_text = ' '.join(cell_texts[:2])  # Time might be in first cells
-                time_match = re.search(r'(\d{1,2}:\d{2}\s*[apAP][mM])', time_text)
-                game_time = time_match.group(1).upper() if time_match else 'TBD'
-                
-                # Extract percentages from the row
-                percentages = []
-                for text in cell_texts:
-                    pct_matches = re.findall(r'(\d+)%', text)
-                    percentages.extend(pct_matches)
-                
+                # Count percentages
+                percentages = re.findall(r'(\d+)%', element_text)
                 if len(percentages) < 2:
                     continue
+                
+                # Look for valid MLB team abbreviations
+                # Common MLB teams
+                mlb_teams = ['NYY', 'BOS', 'TB', 'TOR', 'BAL', 'MIN', 'CLE', 'CWS', 'DET', 'KC',
+                           'HOU', 'TEX', 'LAA', 'SEA', 'OAK', 'ATL', 'WSH', 'PHI', 'NYM', 'MIA',
+                           'MIL', 'CHC', 'CIN', 'PIT', 'STL', 'LAD', 'SD', 'SF', 'COL', 'ARI',
+                           'ANA', 'LA', 'CHW', 'CHI', 'WAS', 'TB', 'SD', 'SF']
+                
+                teams_found = []
+                for team in mlb_teams:
+                    if f' {team} ' in f' {element_text} ' or element_text.startswith(f'{team} ') or element_text.endswith(f' {team}'):
+                        teams_found.append(team)
+                
+                # If we didn't find known teams, try to extract any 2-4 letter abbreviations
+                if len(teams_found) < 2:
+                    potential_teams = re.findall(r'\b([A-Z]{2,4})\b', element_text)
+                    # Filter out non-team words
+                    filtered_teams = [t for t in potential_teams if t not in 
+                                    ['PM', 'AM', 'ET', 'EST', 'CST', 'PST', 'ESPN', 'BET', 'ATS', 
+                                     'DFS', 'UFC', 'MVP', 'DPOY', 'OROY', 'DROY', 'MLB', 'NBA', 
+                                     'NFL', 'NHL', 'ML', 'OVER', 'UNDER', 'YES', 'NO', 'VS']]
+                    teams_found.extend(filtered_teams)
+                
+                # Need at least 2 teams
+                if len(teams_found) < 2:
+                    continue
+                
+                # Extract time
+                time_match = re.search(r'(\d{1,2}:\d{2}\s*[apAP][mM])', element_text)
+                game_time = time_match.group(1).upper() if time_match else 'TBD'
                 
                 # Create game data
                 game_data = {
                     'game_time': game_time,
-                    'away_team': teams[0],
-                    'home_team': teams[1],
+                    'away_team': teams_found[0],
+                    'home_team': teams_found[1],
                     'moneyline_bets_pct': percentages[0] + '%' if len(percentages) > 0 else 'N/A',
                     'moneyline_money_pct': percentages[1] + '%' if len(percentages) > 1 else 'N/A',
                     'spread_bets_pct': percentages[2] + '%' if len(percentages) > 2 else 'N/A',
@@ -108,14 +103,15 @@ def scrape_mlb_data():
                     'timestamp': datetime.now().isoformat()
                 }
                 
-                games.append(game_data)
-                logger.info(f"Successfully parsed game: {teams[0]} @ {teams[1]}")
+                # Avoid duplicates
+                if not any(g['away_team'] == game_data['away_team'] and g['home_team'] == game_data['home_team'] for g in games):
+                    games.append(game_data)
+                    logger.info(f"Found game: {game_data['away_team']} @ {game_data['home_team']}")
                 
             except Exception as e:
-                logger.error(f"Error parsing row {idx}: {str(e)}")
                 continue
         
-        logger.info(f"Total games parsed: {len(games)}")
+        logger.info(f"Total unique games found: {len(games)}")
         return games
         
     except Exception as e:
@@ -130,7 +126,7 @@ def home():
             "/api/health": "Health check",
             "/api/betting/mlb": "Get MLB betting data",
             "/api/debug": "Debug information",
-            "/api/debug/table": "Debug table structure"
+            "/api/debug/structure": "Debug page structure"
         }
     })
 
@@ -143,7 +139,6 @@ def health_check():
 
 @app.route('/api/betting/mlb')
 def get_mlb_data():
-    # Scrape fresh data on each request
     data = scrape_mlb_data()
     
     return jsonify({
@@ -155,7 +150,6 @@ def get_mlb_data():
 
 @app.route('/api/debug')
 def debug_info():
-    """Debug endpoint to see what's happening with the scraper"""
     try:
         url = "https://www.sportsbettingdime.com/mlb/public-betting-trends/"
         headers = {
@@ -165,21 +159,17 @@ def debug_info():
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Get page title
         title = soup.find('title')
         
-        # Count various elements
         divs = len(soup.find_all('div'))
         tables = len(soup.find_all('table'))
         trs = len(soup.find_all('tr'))
         
-        # Find elements with percentages
         percent_elements = soup.find_all(text=re.compile(r'\d+%'))
         
-        # Find team abbreviations
         text = soup.get_text()
         teams = re.findall(r'\b([A-Z]{2,4})\b', text)
-        teams = [t for t in teams if t not in ['PM', 'AM', 'ET', 'EST', 'MLB', 'NBA', 'NFL', 'NHL']][:20]  # First 20
+        teams = [t for t in teams if t not in ['PM', 'AM', 'ET', 'EST', 'MLB', 'NBA', 'NFL', 'NHL']][:20]
         
         return jsonify({
             "status": "OK",
@@ -200,9 +190,9 @@ def debug_info():
             "type": type(e).__name__
         })
 
-@app.route('/api/debug/table')
-def debug_table():
-    """Debug table structure specifically"""
+@app.route('/api/debug/structure')
+def debug_structure():
+    """Debug to find elements with percentages"""
     try:
         url = "https://www.sportsbettingdime.com/mlb/public-betting-trends/"
         headers = {
@@ -212,34 +202,43 @@ def debug_table():
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Find the table
-        table = soup.find('table')
-        if not table:
-            return jsonify({"error": "No table found"})
+        # Find all elements containing percentages
+        elements_with_pct = []
         
-        # Get first 5 rows to understand structure
-        rows = table.find_all('tr')[:5]
+        for element in soup.find_all(text=re.compile(r'\d+%')):
+            parent = element.parent
+            if parent:
+                # Get parent's tag and classes
+                tag = parent.name
+                classes = parent.get('class', [])
+                
+                # Get surrounding text
+                parent_text = parent.get_text(strip=True)[:100]  # First 100 chars
+                
+                # Look for grandparent for more context
+                grandparent = parent.parent
+                gp_tag = grandparent.name if grandparent else 'None'
+                gp_classes = grandparent.get('class', []) if grandparent else []
+                
+                elements_with_pct.append({
+                    "percentage": element.strip(),
+                    "parent_tag": tag,
+                    "parent_classes": classes,
+                    "grandparent_tag": gp_tag,
+                    "grandparent_classes": gp_classes,
+                    "context": parent_text
+                })
         
-        row_data = []
-        for idx, row in enumerate(rows):
-            cells = row.find_all(['td', 'th'])
-            cell_texts = [cell.get_text(strip=True) for cell in cells]
-            row_data.append({
-                "row": idx,
-                "cell_count": len(cells),
-                "cells": cell_texts[:10]  # First 10 cells
-            })
+        # Limit to first 10 for readability
+        elements_with_pct = elements_with_pct[:10]
         
-        # Also check for specific classes or attributes
-        table_classes = table.get('class', [])
-        table_id = table.get('id', '')
+        # Also look for any divs with specific keywords
+        betting_divs = soup.find_all('div', class_=re.compile('bet|trend|public|money|percent', re.I))
         
         return jsonify({
-            "table_found": True,
-            "table_classes": table_classes,
-            "table_id": table_id,
-            "total_rows": len(table.find_all('tr')),
-            "sample_rows": row_data
+            "elements_with_percentages": elements_with_pct,
+            "betting_div_count": len(betting_divs),
+            "sample_betting_div_classes": [div.get('class', []) for div in betting_divs[:5]]
         })
         
     except Exception as e:
