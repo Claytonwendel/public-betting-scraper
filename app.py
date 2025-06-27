@@ -15,7 +15,7 @@ app = Flask(__name__)
 CORS(app)
 
 def scrape_mlb_data():
-    """Scrape MLB betting data looking for tbody without class requirements"""
+    """Scrape MLB betting data from anywhere on the page"""
     try:
         url = "https://www.sportsbettingdime.com/mlb/public-betting-trends/"
         headers = {
@@ -39,99 +39,144 @@ def scrape_mlb_data():
         
         games = []
         
-        # Find ALL tbody elements, regardless of class
-        all_tbody = soup.find_all('tbody')
-        logger.info(f"Found {len(all_tbody)} tbody elements")
+        # Strategy 1: Look for divs/sections containing percentages
+        elements_with_percentages = []
         
-        # Process the tbody we found (there's only 1 according to debug)
-        if all_tbody:
-            tbody = all_tbody[0]  # Get the first (and only) tbody
+        # Find all elements containing percentage text
+        for element in soup.find_all(text=re.compile(r'\d+%')):
+            parent = element.parent
+            # Go up the tree to find a meaningful container
+            while parent and parent.name in ['span', 'b', 'strong', 'em', 'i']:
+                parent = parent.parent
             
-            # Get all rows in this tbody
-            rows = tbody.find_all('tr')
-            logger.info(f"Found {len(rows)} rows in tbody")
+            if parent and parent not in elements_with_percentages:
+                # Check if this parent contains multiple percentages (likely a game)
+                parent_text = parent.get_text()
+                pct_count = len(re.findall(r'\d+%', parent_text))
+                if pct_count >= 2:  # At least 2 percentages
+                    elements_with_percentages.append(parent)
+        
+        logger.info(f"Found {len(elements_with_percentages)} elements with multiple percentages")
+        
+        # Process each element that might be a game
+        for element in elements_with_percentages:
+            try:
+                text = element.get_text(separator=' ', strip=True)
+                
+                # Skip if it's the ML record table
+                if 'ML RECORD' in text.upper() or 'DATE' in text.upper():
+                    continue
+                
+                # Extract all percentages
+                percentages = re.findall(r'(\d+)%', text)
+                if len(percentages) < 2:
+                    continue
+                
+                # Look for time pattern
+                time_match = re.search(r'(\w+ \d+,?\s*\d{1,2}:\d{2}\s*[AP]M)', text)
+                if not time_match:
+                    time_match = re.search(r'(\d{1,2}:\d{2}\s*[AP]M)', text)
+                game_time = time_match.group(1) if time_match else 'TBD'
+                
+                # Extract team abbreviations
+                # Common MLB teams
+                mlb_teams = ['NYY', 'BOS', 'TB', 'TOR', 'BAL', 'MIN', 'CLE', 'CWS', 'DET', 'KC',
+                           'HOU', 'TEX', 'LAA', 'SEA', 'OAK', 'ATL', 'WSH', 'PHI', 'NYM', 'MIA',
+                           'MIL', 'CHC', 'CIN', 'PIT', 'STL', 'LAD', 'SD', 'SF', 'COL', 'ARI',
+                           'ANA', 'LA', 'CHW', 'CHI', 'WAS', 'TBR', 'SDP', 'SFG']
+                
+                teams_found = []
+                for team in mlb_teams:
+                    if team in text:
+                        teams_found.append(team)
+                
+                # If no known teams found, try generic pattern
+                if len(teams_found) < 2:
+                    all_caps = re.findall(r'\b([A-Z]{2,4})\b', text)
+                    non_teams = ['PM', 'AM', 'ET', 'EST', 'CST', 'PST', 'EDT', 'CDT', 'PDT', 'MDT', 
+                                'PT', 'CT', 'MT', 'ESPN', 'BET', 'ATS', 'DFS', 'UFC', 'MVP', 'DPOY', 
+                                'OROY', 'DROY', 'MLB', 'NBA', 'NFL', 'NHL', 'OVER', 'UNDER', 'YES', 
+                                'NO', 'VS', 'ML', 'RECORD', 'DATE', 'TBD']
+                    potential_teams = [t for t in all_caps if t not in non_teams]
+                    teams_found.extend(potential_teams)
+                
+                if len(teams_found) >= 2 and len(percentages) >= 2:
+                    game_data = {
+                        'game_time': game_time,
+                        'away_team': teams_found[0],
+                        'home_team': teams_found[1],
+                        'moneyline_bets_pct': percentages[0] + '%' if len(percentages) > 0 else 'N/A',
+                        'moneyline_money_pct': percentages[1] + '%' if len(percentages) > 1 else 'N/A',
+                        'spread_bets_pct': percentages[2] + '%' if len(percentages) > 2 else 'N/A',
+                        'spread_money_pct': percentages[3] + '%' if len(percentages) > 3 else 'N/A',
+                        'total_bets_pct': percentages[4] + '%' if len(percentages) > 4 else 'N/A',
+                        'total_money_pct': percentages[5] + '%' if len(percentages) > 5 else 'N/A',
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    
+                    # Avoid duplicates
+                    if not any(g['away_team'] == game_data['away_team'] and 
+                             g['home_team'] == game_data['home_team'] for g in games):
+                        games.append(game_data)
+                        logger.info(f"Found game: {teams_found[0]} @ {teams_found[1]}")
+                
+            except Exception as e:
+                logger.error(f"Error processing element: {str(e)}")
+                continue
+        
+        # Strategy 2: Look for specific class patterns if no games found
+        if not games:
+            logger.info("Trying alternative search patterns...")
             
-            # Group rows by 3 (date/time row, away team row, home team row)
-            i = 0
-            while i < len(rows) - 2:
-                try:
-                    # Check if this looks like a game group
-                    row1_text = rows[i].get_text(strip=True)
-                    row2_text = rows[i+1].get_text(strip=True) if i+1 < len(rows) else ""
-                    row3_text = rows[i+2].get_text(strip=True) if i+2 < len(rows) else ""
+            # Common class patterns for betting data
+            possible_selectors = [
+                'div[class*="game"]',
+                'div[class*="match"]',
+                'div[class*="betting"]',
+                'div[class*="public"]',
+                'div[class*="percent"]',
+                'tr[class*="game"]',
+                'tr[class*="match"]',
+                'section[class*="game"]',
+                'article[class*="game"]'
+            ]
+            
+            for selector in possible_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    logger.info(f"Found {len(elements)} elements with selector: {selector}")
+                
+                for element in elements:
+                    text = element.get_text()
+                    percentages = re.findall(r'(\d+)%', text)
                     
-                    # Look for date/time pattern in first row
-                    time_match = re.search(r'(\w+ \d+,?\s*\d{1,2}:\d{2}\s*[AP]M)', row1_text)
-                    if not time_match:
-                        time_match = re.search(r'(\d{1,2}:\d{2}\s*[AP]M)', row1_text)
-                    
-                    # Check if rows 2 and 3 have percentages (indicating team rows)
-                    if time_match and '%' in row2_text and '%' in row3_text:
-                        game_time = time_match.group(1)
+                    if len(percentages) >= 2:
+                        # Extract teams and time similar to above
+                        all_caps = re.findall(r'\b([A-Z]{2,4})\b', text)
+                        teams = [t for t in all_caps if t not in ['PM', 'AM', 'ET', 'EST', 'MLB', 'NBA', 'NFL', 'NHL']]
                         
-                        # Process away team (row 2)
-                        away_cells = rows[i+1].find_all(['td', 'th'])
-                        away_text = rows[i+1].get_text(strip=True)
-                        away_percentages = re.findall(r'(\d+)%', away_text)
-                        
-                        # Process home team (row 3)
-                        home_cells = rows[i+2].find_all(['td', 'th'])
-                        home_text = rows[i+2].get_text(strip=True)
-                        home_percentages = re.findall(r'(\d+)%', home_text)
-                        
-                        # Extract team names
-                        away_teams = re.findall(r'\b([A-Z]{2,4})\b', away_text)
-                        home_teams = re.findall(r'\b([A-Z]{2,4})\b', home_text)
-                        
-                        # Filter out non-team abbreviations
-                        non_teams = ['PM', 'AM', 'ET', 'EST', 'CST', 'PST', 'EDT', 'CDT', 'PDT', 'MDT', 'PT', 'CT', 'MT', 'ESPN', 'BET', 'ATS', 'DFS', 'UFC', 'MVP', 'DPOY', 'OROY', 'DROY', 'MLB', 'NBA', 'NFL', 'NHL', 'OVER', 'UNDER', 'YES', 'NO', 'VS']
-                        away_teams = [t for t in away_teams if t not in non_teams]
-                        home_teams = [t for t in home_teams if t not in non_teams]
-                        
-                        if away_teams and home_teams and len(away_percentages) >= 2 and len(home_percentages) >= 2:
+                        if len(teams) >= 2:
+                            time_match = re.search(r'(\d{1,2}:\d{2}\s*[AP]M)', text)
+                            game_time = time_match.group(1) if time_match else 'TBD'
+                            
                             game_data = {
                                 'game_time': game_time,
-                                'away_team': away_teams[0],
-                                'home_team': home_teams[0],
-                                # Away team percentages
-                                'away_moneyline_bets_pct': away_percentages[0] + '%' if len(away_percentages) > 0 else 'N/A',
-                                'away_moneyline_money_pct': away_percentages[1] + '%' if len(away_percentages) > 1 else 'N/A',
-                                'away_spread_bets_pct': away_percentages[2] + '%' if len(away_percentages) > 2 else 'N/A',
-                                'away_spread_money_pct': away_percentages[3] + '%' if len(away_percentages) > 3 else 'N/A',
-                                'away_total_bets_pct': away_percentages[4] + '%' if len(away_percentages) > 4 else 'N/A',
-                                'away_total_money_pct': away_percentages[5] + '%' if len(away_percentages) > 5 else 'N/A',
-                                # Home team percentages
-                                'home_moneyline_bets_pct': home_percentages[0] + '%' if len(home_percentages) > 0 else 'N/A',
-                                'home_moneyline_money_pct': home_percentages[1] + '%' if len(home_percentages) > 1 else 'N/A',
-                                'home_spread_bets_pct': home_percentages[2] + '%' if len(home_percentages) > 2 else 'N/A',
-                                'home_spread_money_pct': home_percentages[3] + '%' if len(home_percentages) > 3 else 'N/A',
-                                'home_total_bets_pct': home_percentages[4] + '%' if len(home_percentages) > 4 else 'N/A',
-                                'home_total_money_pct': home_percentages[5] + '%' if len(home_percentages) > 5 else 'N/A',
-                                # Simplified fields for frontend compatibility
-                                'moneyline_bets_pct': away_percentages[0] + '%' if len(away_percentages) > 0 else 'N/A',
-                                'moneyline_money_pct': away_percentages[1] + '%' if len(away_percentages) > 1 else 'N/A',
-                                'spread_bets_pct': away_percentages[2] + '%' if len(away_percentages) > 2 else 'N/A',
-                                'spread_money_pct': away_percentages[3] + '%' if len(away_percentages) > 3 else 'N/A',
-                                'total_bets_pct': away_percentages[4] + '%' if len(away_percentages) > 4 else 'N/A',
-                                'total_money_pct': away_percentages[5] + '%' if len(away_percentages) > 5 else 'N/A',
+                                'away_team': teams[0],
+                                'home_team': teams[1],
+                                'moneyline_bets_pct': percentages[0] + '%',
+                                'moneyline_money_pct': percentages[1] + '%' if len(percentages) > 1 else 'N/A',
+                                'spread_bets_pct': percentages[2] + '%' if len(percentages) > 2 else 'N/A',
+                                'spread_money_pct': percentages[3] + '%' if len(percentages) > 3 else 'N/A',
+                                'total_bets_pct': percentages[4] + '%' if len(percentages) > 4 else 'N/A',
+                                'total_money_pct': percentages[5] + '%' if len(percentages) > 5 else 'N/A',
                                 'timestamp': datetime.now().isoformat()
                             }
                             
-                            games.append(game_data)
-                            logger.info(f"Successfully parsed game: {away_teams[0]} @ {home_teams[0]} at {game_time}")
-                            
-                            # Skip next 2 rows since we processed them
-                            i += 3
-                            continue
-                    
-                    i += 1
-                    
-                except Exception as e:
-                    logger.error(f"Error parsing rows starting at {i}: {str(e)}")
-                    i += 1
-                    continue
+                            if not any(g['away_team'] == game_data['away_team'] and 
+                                     g['home_team'] == game_data['home_team'] for g in games):
+                                games.append(game_data)
         
-        logger.info(f"Total games parsed: {len(games)}")
+        logger.info(f"Total games found: {len(games)}")
         return games
         
     except Exception as e:
@@ -146,8 +191,9 @@ def home():
             "/api/health": "Health check",
             "/api/betting/mlb": "Get MLB betting data",
             "/api/debug": "Debug information",
+            "/api/debug/tbody": "Debug tbody content",
             "/api/debug/full": "Full diagnostic information",
-            "/api/debug/tbody": "Debug tbody content"
+            "/api/debug/percentages": "Debug percentage locations"
         }
     })
 
@@ -291,6 +337,52 @@ def debug_full():
             "content_length": len(response.content),
             "sample_content": body_text,
             "script_count": len(scripts)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "type": type(e).__name__
+        })
+
+@app.route('/api/debug/percentages')
+def debug_percentages():
+    """Show where percentages are located in the HTML"""
+    try:
+        url = "https://www.sportsbettingdime.com/mlb/public-betting-trends/"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        percentage_info = []
+        
+        # Find all text nodes containing percentages
+        for element in soup.find_all(text=re.compile(r'\d+%')):
+            parent = element.parent
+            grandparent = parent.parent if parent else None
+            great_grandparent = grandparent.parent if grandparent else None
+            
+            info = {
+                "percentage": element.strip(),
+                "parent_tag": parent.name if parent else "None",
+                "parent_class": parent.get('class', []) if parent else [],
+                "grandparent_tag": grandparent.name if grandparent else "None",
+                "grandparent_class": grandparent.get('class', []) if grandparent else [],
+                "great_grandparent_tag": great_grandparent.name if great_grandparent else "None",
+                "great_grandparent_class": great_grandparent.get('class', []) if great_grandparent else [],
+                "context": parent.get_text(strip=True)[:100] if parent else ""
+            }
+            percentage_info.append(info)
+        
+        # Limit to first 15 for readability
+        percentage_info = percentage_info[:15]
+        
+        return jsonify({
+            "total_percentages_found": len(soup.find_all(text=re.compile(r'\d+%'))),
+            "sample_percentages": percentage_info
         })
         
     except Exception as e:
